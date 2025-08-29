@@ -2,6 +2,6 @@ module example
 
 go 1.25
 
-require logger v0.0.0
+require github.com/SergeyDavidenko/logger v0.0.0
 
-replace logger => ../
+replace github.com/SergeyDavidenko/logger => ../

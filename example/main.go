@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"logger"
+	"github.com/SergeyDavidenko/logger"
 )
 
 // Example functions to demonstrate function name capture
