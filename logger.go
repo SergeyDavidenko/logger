@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -106,6 +107,10 @@ type Logger struct {
 	bufferSize    int
 	flushInterval time.Duration
 	asyncEnabled  bool
+	// Standard log interface compatibility
+	output io.Writer
+	prefix string
+	flags  int
 }
 
 // Protocol represents the network protocol type
@@ -198,6 +203,10 @@ func New(config Config) *Logger {
 		bufferSize:    bufferSize,
 		flushInterval: flushInterval,
 		asyncEnabled:  config.AsyncEnabled,
+		// Standard log interface compatibility
+		output: os.Stderr,
+		prefix: "",
+		flags:  0,
 	}
 
 	// Initialize async logging if enabled
@@ -654,6 +663,114 @@ func (l *Logger) Error(message string, args ...interface{}) {
 func (l *Logger) Fatal(message string, args ...interface{}) {
 	l.log(FATAL, message, args...)
 	os.Exit(1)
+}
+
+// Standard log interface methods for compatibility with log package
+
+// Print calls l.Info for the default logger
+func (l *Logger) Print(v ...interface{}) {
+	message := fmt.Sprint(v...)
+	l.Info(message)
+}
+
+// Printf calls l.Info for the default logger
+func (l *Logger) Printf(format string, v ...interface{}) {
+	l.Info(format, v...)
+}
+
+// Println calls l.Info for the default logger
+func (l *Logger) Println(v ...interface{}) {
+	message := fmt.Sprintln(v...)
+	// Remove trailing newline since our logger adds its own formatting
+	if len(message) > 0 && message[len(message)-1] == '\n' {
+		message = message[:len(message)-1]
+	}
+	l.Info(message)
+}
+
+// Fatalf calls l.Fatal with formatted message
+func (l *Logger) Fatalf(format string, v ...interface{}) {
+	message := fmt.Sprintf(format, v...)
+	l.log(FATAL, message)
+	os.Exit(1)
+}
+
+// Fatalln calls l.Fatal with sprintln-formatted message
+func (l *Logger) Fatalln(v ...interface{}) {
+	message := fmt.Sprintln(v...)
+	// Remove trailing newline since our logger adds its own formatting
+	if len(message) > 0 && message[len(message)-1] == '\n' {
+		message = message[:len(message)-1]
+	}
+	l.log(FATAL, message)
+	os.Exit(1)
+}
+
+// Panic logs a message at ERROR level and panics
+func (l *Logger) Panic(v ...interface{}) {
+	message := fmt.Sprint(v...)
+	l.Error(message)
+	panic(message)
+}
+
+// Panicf logs a formatted message at ERROR level and panics
+func (l *Logger) Panicf(format string, v ...interface{}) {
+	message := fmt.Sprintf(format, v...)
+	l.Error(message)
+	panic(message)
+}
+
+// Panicln logs a sprintln-formatted message at ERROR level and panics
+func (l *Logger) Panicln(v ...interface{}) {
+	message := fmt.Sprintln(v...)
+	// Remove trailing newline since our logger adds its own formatting
+	if len(message) > 0 && message[len(message)-1] == '\n' {
+		message = message[:len(message)-1]
+	}
+	l.Error(message)
+	panic(message)
+}
+
+// SetOutput sets the output destination for the logger
+func (l *Logger) SetOutput(w io.Writer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.output = w
+}
+
+// Output returns the current output destination
+func (l *Logger) Output() io.Writer {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.output
+}
+
+// SetFlags sets the output flags for the logger (for compatibility)
+func (l *Logger) SetFlags(flag int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.flags = flag
+}
+
+// Flags returns the output flags for the logger
+func (l *Logger) Flags() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.flags
+}
+
+// SetPrefix sets the output prefix for the logger
+func (l *Logger) SetPrefix(prefix string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.prefix = prefix
+}
+
+// Prefix returns the output prefix for the logger
+func (l *Logger) Prefix() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.prefix
 }
 
 // Close closes the connection to logstash and stops monitoring

@@ -1,6 +1,10 @@
 package logger
 
 import (
+	"bytes"
+	"io"
+	"log"
+	"os"
 	"testing"
 	"time"
 )
@@ -479,4 +483,235 @@ func TestLogger_FunctionNameCapture(t *testing.T) {
 
 	// Note: This is more of an integration test to ensure the code doesn't crash
 	// The actual function name capture is demonstrated in the example
+}
+
+// Standard logging interface compatibility tests
+
+func TestLogger_StandardLogInterface(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test that our logger implements the basic interface methods
+	// Note: Fatal method has different signature than standard log, so we test separately
+	var _ interface {
+		Print(v ...interface{})
+		Printf(format string, v ...interface{})
+		Println(v ...interface{})
+		Fatalf(format string, v ...interface{})
+		Fatalln(v ...interface{})
+		Panic(v ...interface{})
+		Panicf(format string, v ...interface{})
+		Panicln(v ...interface{})
+		SetOutput(w io.Writer)
+		SetFlags(flag int)
+		Flags() int
+		SetPrefix(prefix string)
+		Prefix() string
+	} = logger
+
+	// Test Print methods (these should not panic)
+	logger.Print("test message")
+	logger.Printf("test %s", "formatted")
+	logger.Println("test", "println")
+}
+
+func TestLogger_SetOutput(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test default output (compare types rather than exact instances)
+	defaultOutput := logger.Output()
+	if defaultOutput == nil {
+		t.Error("Default output should not be nil")
+	}
+
+	// Test setting custom output
+	var buf bytes.Buffer
+	logger.SetOutput(&buf)
+
+	currentOutput := logger.Output()
+	if currentOutput != &buf {
+		t.Errorf("Output should be set to custom buffer, got %T", currentOutput)
+	}
+
+	// Test that we can set back to os.Stderr
+	logger.SetOutput(os.Stderr)
+	if logger.Output() != os.Stderr {
+		t.Error("Should be able to set output back to os.Stderr")
+	}
+}
+
+func TestLogger_PrefixAndFlags(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test default prefix and flags
+	if logger.Prefix() != "" {
+		t.Errorf("Default prefix should be empty, got '%s'", logger.Prefix())
+	}
+
+	if logger.Flags() != 0 {
+		t.Errorf("Default flags should be 0, got %d", logger.Flags())
+	}
+
+	// Test setting prefix
+	testPrefix := "TEST: "
+	logger.SetPrefix(testPrefix)
+	if logger.Prefix() != testPrefix {
+		t.Errorf("Expected prefix '%s', got '%s'", testPrefix, logger.Prefix())
+	}
+
+	// Test setting flags
+	testFlags := log.LstdFlags | log.Lshortfile
+	logger.SetFlags(testFlags)
+	if logger.Flags() != testFlags {
+		t.Errorf("Expected flags %d, got %d", testFlags, logger.Flags())
+	}
+}
+
+func TestLogger_PanicMethods(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test Panic method
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Panic() should have panicked")
+			} else {
+				expected := "test panic message"
+				if r != expected {
+					t.Errorf("Expected panic message '%s', got '%v'", expected, r)
+				}
+			}
+		}()
+		logger.Panic("test panic message")
+	}()
+
+	// Test Panicf method
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Panicf() should have panicked")
+			} else {
+				expected := "formatted panic: test"
+				if r != expected {
+					t.Errorf("Expected panic message '%s', got '%v'", expected, r)
+				}
+			}
+		}()
+		logger.Panicf("formatted panic: %s", "test")
+	}()
+
+	// Test Panicln method
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Panicln() should have panicked")
+			} else {
+				expected := "panic line test"
+				if r != expected {
+					t.Errorf("Expected panic message '%s', got '%v'", expected, r)
+				}
+			}
+		}()
+		logger.Panicln("panic", "line", "test")
+	}()
+}
+
+func TestLogger_AsStandardLoggerReplacement(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test that we can use our logger where a standard logger is expected
+	useStandardLogger := func(l interface {
+		Printf(format string, v ...interface{})
+		Println(v ...interface{})
+	}) {
+		l.Printf("Standard logger test: %s", "success")
+		l.Println("Standard logger println test")
+	}
+
+	// This should not cause any compilation errors or runtime panics
+	useStandardLogger(logger)
+}
+
+func TestLogger_PrintMethods_MessageFormatting(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test that Print methods format messages correctly
+	// These should not panic and should handle various input types
+	logger.Print("simple")
+	logger.Print("multiple", "arguments", 123, true)
+	logger.Printf("formatted %s %d %v", "string", 42, []int{1, 2, 3})
+	logger.Println("println", "with", "multiple", "args")
+
+	// Test edge cases
+	logger.Print()          // empty args
+	logger.Printf("")       // empty format
+	logger.Println()        // empty args
+	logger.Printf("%s", "") // empty string
+}
+
+func TestLogger_FatalMethods_DoNotExit(t *testing.T) {
+	// Note: We can't easily test Fatal methods because they call os.Exit(1)
+	// In a real scenario, you would need to test these in a separate process
+	// or use dependency injection to mock os.Exit
+
+	// This test just documents the expected behavior
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// These methods exist and have the correct signatures
+	_ = logger.Fatal
+	_ = logger.Fatalf
+	_ = logger.Fatalln
+
+	// In real usage, these would call os.Exit(1):
+	// logger.Fatal("fatal message")
+	// logger.Fatalf("fatal %s", "formatted")
+	// logger.Fatalln("fatal", "line")
 }
