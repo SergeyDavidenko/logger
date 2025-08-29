@@ -203,7 +203,7 @@ func (l *Logger) SetLogstashEnabled(enabled bool) {
 			l.connectToLogstash()
 		}
 		if l.reconnectTicker == nil {
-			l.startReconnectMonitor()
+			l.startReconnectMonitorUnsafe()
 		}
 	} else if !enabled {
 		if l.conn != nil {
@@ -261,20 +261,32 @@ func (l *Logger) connectToLogstash() bool {
 
 // startReconnectMonitor starts a background goroutine to monitor connection health
 func (l *Logger) startReconnectMonitor() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.startReconnectMonitorUnsafe()
+}
+
+// startReconnectMonitorUnsafe starts reconnect monitor without locking (must be called with mutex held)
+func (l *Logger) startReconnectMonitorUnsafe() {
 	if l.protocol != TCP || l.reconnectTicker != nil {
 		return // Only for TCP connections and if not already started
 	}
 
 	l.reconnectTicker = time.NewTicker(l.reconnectDelay)
+	ticker := l.reconnectTicker // Capture ticker to avoid race condition
 
 	go func() {
-		defer l.reconnectTicker.Stop()
+		defer func() {
+			if ticker != nil {
+				ticker.Stop()
+			}
+		}()
 
 		for {
 			select {
 			case <-l.ctx.Done():
 				return
-			case <-l.reconnectTicker.C:
+			case <-ticker.C:
 				l.checkAndReconnect()
 			}
 		}

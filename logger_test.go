@@ -257,6 +257,9 @@ func TestLogger_SetLogstashEnabled(t *testing.T) {
 	if logger.IsLogstashEnabled() {
 		t.Error("Logstash should be disabled")
 	}
+
+	// Give goroutines time to cleanup
+	time.Sleep(10 * time.Millisecond)
 }
 
 func TestLogger_LogLevels(t *testing.T) {
