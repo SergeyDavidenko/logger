@@ -41,6 +41,35 @@ func (l LogLevel) String() string {
 	}
 }
 
+// ParseLogLevel parses a string and returns the corresponding LogLevel
+// Accepts: "DEBUG", "INFO", "WARN", "ERROR", "FATAL" (case insensitive)
+// Returns the LogLevel and a boolean indicating if parsing was successful
+func ParseLogLevel(level string) (LogLevel, bool) {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "DEBUG":
+		return DEBUG, true
+	case "INFO":
+		return INFO, true
+	case "WARN", "WARNING":
+		return WARN, true
+	case "ERROR":
+		return ERROR, true
+	case "FATAL":
+		return FATAL, true
+	default:
+		return INFO, false // default to INFO if parsing fails
+	}
+}
+
+// MustParseLogLevel parses a string and returns the corresponding LogLevel
+// Panics if the level string is invalid
+func MustParseLogLevel(level string) LogLevel {
+	if logLevel, ok := ParseLogLevel(level); ok {
+		return logLevel
+	}
+	panic(fmt.Sprintf("invalid log level: %s", level))
+}
+
 // LogEntry represents a log entry
 type LogEntry struct {
 	Timestamp   string `json:"@timestamp"`

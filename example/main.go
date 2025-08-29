@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/SergeyDavidenko/logger"
@@ -22,6 +23,16 @@ func handleError(log *logger.Logger) {
 }
 
 func main() {
+	// Demonstrate parsing log level from string
+	logLevelStr := "INFO" // This could come from config file or environment variable
+	minLevel, ok := logger.ParseLogLevel(logLevelStr)
+	if !ok {
+		// Fallback to default level if parsing fails
+		minLevel = logger.INFO
+		fmt.Printf("Warning: Invalid log level '%s', using INFO\n", logLevelStr)
+	}
+	fmt.Printf("Using log level: %s\n", minLevel.String())
+
 	// Create logger configuration with async logging
 	config := logger.Config{
 		TimestampFormat:   "2006-01-02 15:04:05.000", // custom timestamp format
@@ -30,7 +41,7 @@ func main() {
 		LogstashEnabled:   true,                      // enable sending to logstash
 		Protocol:          logger.TCP,                // use TCP protocol (can be logger.UDP)
 		AppName:           "example-app",
-		MinLevel:          logger.DEBUG,    // minimum logging level
+		MinLevel:          minLevel,        // use parsed minimum logging level
 		ReconnectAttempts: 5,               // max 5 reconnection attempts (0 = infinite)
 		ReconnectDelay:    3 * time.Second, // 3 seconds between reconnection attempts
 		// Async logging configuration
@@ -132,6 +143,24 @@ func main() {
 	log.Info("Forcing flush of all buffered logs...")
 	log.Flush() // Force immediate flush
 	log.Info("All logs flushed!")
+
+	// Demonstrate log level parsing functionality
+	log.Info("=== Log Level Parsing Demonstration ===")
+
+	// Test various log level strings
+	testLevels := []string{"DEBUG", "info", "WARN", "error", "FATAL", "warning", "invalid"}
+	for _, levelStr := range testLevels {
+		if parsedLevel, ok := logger.ParseLogLevel(levelStr); ok {
+			log.Info("Successfully parsed '%s' -> %s", levelStr, parsedLevel.String())
+		} else {
+			log.Warn("Failed to parse log level: '%s', defaulted to INFO", levelStr)
+		}
+	}
+
+	// Demonstrate MustParseLogLevel (safe usage)
+	log.Info("=== MustParseLogLevel Demonstration ===")
+	safeLevel := logger.MustParseLogLevel("ERROR")
+	log.Info("MustParseLogLevel('ERROR') = %s", safeLevel.String())
 
 	// Small pause to send all logs
 	time.Sleep(100 * time.Millisecond)

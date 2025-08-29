@@ -319,6 +319,68 @@ func TestLogLevel_String(t *testing.T) {
 	}
 }
 
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		input       string
+		expectedLvl LogLevel
+		expectedOk  bool
+	}{
+		{"DEBUG", DEBUG, true},
+		{"debug", DEBUG, true},
+		{"  DEBUG  ", DEBUG, true},
+		{"INFO", INFO, true},
+		{"info", INFO, true},
+		{"WARN", WARN, true},
+		{"warn", WARN, true},
+		{"WARNING", WARN, true},
+		{"warning", WARN, true},
+		{"ERROR", ERROR, true},
+		{"error", ERROR, true},
+		{"FATAL", FATAL, true},
+		{"fatal", FATAL, true},
+		{"INVALID", INFO, false},
+		{"", INFO, false},
+		{"trace", INFO, false},
+	}
+
+	for _, test := range tests {
+		level, ok := ParseLogLevel(test.input)
+		if level != test.expectedLvl || ok != test.expectedOk {
+			t.Errorf("ParseLogLevel(%q) = (%v, %v), expected (%v, %v)",
+				test.input, level, ok, test.expectedLvl, test.expectedOk)
+		}
+	}
+}
+
+func TestMustParseLogLevel(t *testing.T) {
+	// Test valid levels
+	validTests := []struct {
+		input    string
+		expected LogLevel
+	}{
+		{"DEBUG", DEBUG},
+		{"info", INFO},
+		{"WARN", WARN},
+		{"error", ERROR},
+		{"FATAL", FATAL},
+	}
+
+	for _, test := range validTests {
+		level := MustParseLogLevel(test.input)
+		if level != test.expected {
+			t.Errorf("MustParseLogLevel(%q) = %v, expected %v", test.input, level, test.expected)
+		}
+	}
+
+	// Test invalid level (should panic)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("MustParseLogLevel with invalid level should panic")
+		}
+	}()
+	MustParseLogLevel("INVALID")
+}
+
 func BenchmarkLogger_Info(b *testing.B) {
 	config := Config{
 		LogstashHost:    "localhost",
