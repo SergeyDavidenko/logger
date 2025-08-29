@@ -20,14 +20,28 @@ jobs:
         go-version: 1.25
 
     - name: Run tests
-      run: go test -v ./...
+      run: go test -v -race -coverprofile=coverage.out ./...
+      
+    - name: Run benchmarks
+      run: go test -bench=. -benchmem ./...
+      
+    - name: Check formatting
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "Code is not formatted correctly"
+          exit 1
+        fi
+        
+    - name: Run go vet
+      run: go vet ./...
 
     - name: Create Release
-      uses: actions/create-release@v1
+      uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
         draft: false
         prerelease: false
+        generate_release_notes: true
