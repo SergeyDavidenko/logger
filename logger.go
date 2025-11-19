@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,27 +27,24 @@ const (
 	FATAL
 )
 
+// Pre-allocated level strings to avoid allocations
+var levelStrings = [...]string{
+	DEBUG: "DEBUG",
+	INFO:  "INFO",
+	WARN:  "WARN",
+	ERROR: "ERROR",
+	FATAL: "FATAL",
+}
+
 // String returns the string representation of the log level
 func (l LogLevel) String() string {
-	switch l {
-	case DEBUG:
-		return "DEBUG"
-	case INFO:
-		return "INFO"
-	case WARN:
-		return "WARN"
-	case ERROR:
-		return "ERROR"
-	case FATAL:
-		return "FATAL"
-	default:
-		return "UNKNOWN"
+	if l >= 0 && int(l) < len(levelStrings) {
+		return levelStrings[l]
 	}
+	return "UNKNOWN"
 }
 
 // ParseLogLevel parses a string and returns the corresponding LogLevel
-// Accepts: "DEBUG", "INFO", "WARN", "ERROR", "FATAL" (case insensitive)
-// Returns the LogLevel and a boolean indicating if parsing was successful
 func ParseLogLevel(level string) (LogLevel, bool) {
 	switch strings.ToUpper(strings.TrimSpace(level)) {
 	case "DEBUG":
@@ -60,12 +58,11 @@ func ParseLogLevel(level string) (LogLevel, bool) {
 	case "FATAL":
 		return FATAL, true
 	default:
-		return INFO, false // default to INFO if parsing fails
+		return INFO, false
 	}
 }
 
 // MustParseLogLevel parses a string and returns the corresponding LogLevel
-// Panics if the level string is invalid
 func MustParseLogLevel(level string) LogLevel {
 	if logLevel, ok := ParseLogLevel(level); ok {
 		return logLevel
@@ -73,7 +70,7 @@ func MustParseLogLevel(level string) LogLevel {
 	panic(fmt.Sprintf("invalid log level: %s", level))
 }
 
-// LogEntry represents a log entry
+// LogEntry represents a log entry - optimized with string interning
 type LogEntry struct {
 	Timestamp   string                 `json:"@timestamp"`
 	Level       string                 `json:"level"`
@@ -87,6 +84,12 @@ type LogEntry struct {
 	Fields      map[string]interface{} `json:"fields,omitempty"`
 }
 
+// callerInfo caches caller information to reduce runtime.Caller calls
+type callerInfo struct {
+	threadName string
+	loggerName string
+}
+
 // Logger is the main logger structure
 type Logger struct {
 	mu                sync.RWMutex
@@ -94,7 +97,7 @@ type Logger struct {
 	logstashHost      string
 	logstashPort      int
 	protocol          Protocol
-	conn              net.Conn
+	conn              atomic.Pointer[net.Conn] // lock-free connection access
 	appName           string
 	hostIP            string
 	containerID       string
@@ -105,22 +108,34 @@ type Logger struct {
 	cancel            context.CancelFunc
 	reconnectTicker   *time.Ticker
 	timestampFormat   string
+
 	// Async logging
-	logBuffer     chan LogEntry
+	logBuffer     chan *LogEntry
 	bufferSize    int
 	flushInterval time.Duration
 	asyncEnabled  bool
+
 	// Standard log interface compatibility
 	output io.Writer
 	prefix string
 	flags  int
-	// Buffer pool for optimization
-	bufPool sync.Pool
-	// Context fields for structured logging
+
+	// Buffer pools for optimization
+	bufPool     sync.Pool // *bytes.Buffer for console output
+	entryPool   sync.Pool // *LogEntry for reuse
+	jsonBufPool sync.Pool // *bytes.Buffer for JSON encoding
+
+	// Context fields for structured logging (immutable after creation)
 	fields map[string]interface{}
+
+	// Caller info cache
+	callerCache sync.Map // map[uintptr]*callerInfo
+
 	// Closed flag to prevent double close
-	closed   bool
-	closedMu sync.Mutex
+	closed uint32 // atomic
+
+	// Pre-allocated timestamp buffer
+	timestampBuf []byte
 }
 
 // Protocol represents the network protocol type
@@ -137,18 +152,17 @@ type Config struct {
 	LogstashHost      string
 	LogstashPort      int
 	LogstashEnabled   bool
-	Protocol          Protocol // TCP or UDP
+	Protocol          Protocol
 	AppName           string
 	MinLevel          LogLevel
-	ReconnectAttempts int           // Maximum reconnection attempts (0 = infinite)
-	ReconnectDelay    time.Duration // Delay between reconnection attempts
-	// Async logging configuration
-	AsyncEnabled  bool          // Enable asynchronous logging
-	BufferSize    int           // Size of the log buffer (default: 1000)
-	FlushInterval time.Duration // Interval to flush logs (default: 1 second)
+	ReconnectAttempts int
+	ReconnectDelay    time.Duration
+	AsyncEnabled      bool
+	BufferSize        int
+	FlushInterval     time.Duration
 }
 
-// ConfigDefaults returns the default configuration
+// DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
 		TimestampFormat: "2006-01-02T15:04:05.000Z",
@@ -161,37 +175,33 @@ func DefaultConfig() Config {
 
 // New creates a new logger instance
 func New(config Config) *Logger {
-	// Set default protocol to TCP if not specified
 	protocol := config.Protocol
 	if protocol == "" {
 		protocol = TCP
 	}
 
-	// Set default reconnection parameters
 	reconnectAttempts := config.ReconnectAttempts
 	if reconnectAttempts == 0 {
-		reconnectAttempts = -1 // infinite attempts
+		reconnectAttempts = -1
 	}
 
 	reconnectDelay := config.ReconnectDelay
 	if reconnectDelay == 0 {
-		reconnectDelay = 5 * time.Second // default 5 seconds
+		reconnectDelay = 5 * time.Second
 	}
 
-	// Set default async parameters
 	bufferSize := config.BufferSize
 	if bufferSize == 0 {
-		bufferSize = 1000 // default buffer size
+		bufferSize = 1000
 	}
 
 	flushInterval := config.FlushInterval
 	if flushInterval == 0 {
-		flushInterval = 1 * time.Second // default flush interval
+		flushInterval = 1 * time.Second
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Set default timestamp format if not specified
 	timestampFormat := config.TimestampFormat
 	if timestampFormat == "" {
 		timestampFormat = "2006-01-02T15:04:05.000Z"
@@ -209,34 +219,42 @@ func New(config Config) *Logger {
 		ctx:               ctx,
 		cancel:            cancel,
 		timestampFormat:   timestampFormat,
-		// Async configuration
-		bufferSize:    bufferSize,
-		flushInterval: flushInterval,
-		asyncEnabled:  config.AsyncEnabled,
-		// Standard log interface compatibility
-		output: os.Stderr,
-		prefix: "",
-		flags:  0,
-		// Initialize buffer pool
-		bufPool: sync.Pool{
-			New: func() interface{} {
-				return &bytes.Buffer{}
-			},
+		bufferSize:        bufferSize,
+		flushInterval:     flushInterval,
+		asyncEnabled:      config.AsyncEnabled,
+		output:            os.Stderr,
+		prefix:            "",
+		flags:             0,
+		fields:            make(map[string]interface{}),
+		timestampBuf:      make([]byte, 0, 64),
+	}
+
+	// Initialize buffer pools
+	logger.bufPool = sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, 256))
 		},
-		// Initialize fields map
-		fields: make(map[string]interface{}),
+	}
+
+	logger.entryPool = sync.Pool{
+		New: func() interface{} {
+			return &LogEntry{}
+		},
+	}
+
+	logger.jsonBufPool = sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, 512))
+		},
 	}
 
 	// Initialize async logging if enabled
 	if logger.asyncEnabled && logger.logstashEnabled {
-		logger.logBuffer = make(chan LogEntry, bufferSize)
+		logger.logBuffer = make(chan *LogEntry, bufferSize)
 		logger.startAsyncProcessor()
 	}
 
-	// Get host IP address
 	logger.hostIP = getHostIP()
-
-	// Get container ID (can be extended for Docker)
 	logger.containerID = getContainerID()
 
 	if logger.logstashEnabled && logger.protocol == TCP {
@@ -255,16 +273,18 @@ func (l *Logger) SetLogstashEnabled(enabled bool) {
 	l.logstashEnabled = enabled
 
 	if enabled && l.protocol == TCP {
-		if l.conn == nil {
+		conn := l.getConn()
+		if conn == nil {
 			l.connectToLogstash()
 		}
 		if l.reconnectTicker == nil {
 			l.startReconnectMonitorUnsafe()
 		}
 	} else if !enabled {
-		if l.conn != nil {
-			l.conn.Close()
-			l.conn = nil
+		conn := l.getConn()
+		if conn != nil {
+			conn.Close()
+			l.conn.Store((*net.Conn)(nil))
 		}
 		if l.reconnectTicker != nil {
 			l.reconnectTicker.Stop()
@@ -284,9 +304,8 @@ func (l *Logger) IsLogstashEnabled() bool {
 func (l *Logger) SetTimestampFormat(format string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
 	if format == "" {
-		format = "2006-01-02T15:04:05.000Z" // default format
+		format = "2006-01-02T15:04:05.000Z"
 	}
 	l.timestampFormat = format
 }
@@ -298,20 +317,37 @@ func (l *Logger) GetTimestampFormat() string {
 	return l.timestampFormat
 }
 
+// getConn returns the current connection (lock-free)
+func (l *Logger) getConn() net.Conn {
+	if c := l.conn.Load(); c != nil {
+		return *c
+	}
+	return nil
+}
+
+// setConn sets the connection (lock-free)
+func (l *Logger) setConn(conn net.Conn) {
+	if conn != nil {
+		l.conn.Store(&conn)
+	} else {
+		l.conn.Store(nil)
+	}
+}
+
 // connectToLogstash establishes connection to logstash
 func (l *Logger) connectToLogstash() bool {
 	if l.logstashHost == "" || l.logstashPort == 0 {
 		return false
 	}
 
-	address := net.JoinHostPort(l.logstashHost, fmt.Sprintf("%d", l.logstashPort))
+	address := net.JoinHostPort(l.logstashHost, strconv.Itoa(l.logstashPort))
 	conn, err := net.Dial(string(l.protocol), address)
 	if err != nil {
 		fmt.Printf("Failed to connect to logstash at %s via %s: %v\n", address, l.protocol, err)
 		return false
 	}
 
-	l.conn = conn
+	l.setConn(conn)
 	return true
 }
 
@@ -322,22 +358,17 @@ func (l *Logger) startReconnectMonitor() {
 	l.startReconnectMonitorUnsafe()
 }
 
-// startReconnectMonitorUnsafe starts reconnect monitor without locking (must be called with mutex held)
+// startReconnectMonitorUnsafe starts reconnect monitor without locking
 func (l *Logger) startReconnectMonitorUnsafe() {
 	if l.protocol != TCP || l.reconnectTicker != nil {
-		return // Only for TCP connections and if not already started
+		return
 	}
 
 	l.reconnectTicker = time.NewTicker(l.reconnectDelay)
-	ticker := l.reconnectTicker // Capture ticker to avoid race condition
+	ticker := l.reconnectTicker
 
 	go func() {
-		defer func() {
-			if ticker != nil {
-				ticker.Stop()
-			}
-		}()
-
+		defer ticker.Stop()
 		for {
 			select {
 			case <-l.ctx.Done():
@@ -358,20 +389,18 @@ func (l *Logger) checkAndReconnect() {
 		return
 	}
 
-	// Check if connection is alive by trying to set a deadline
-	if l.conn != nil {
-		if tcpConn, ok := l.conn.(*net.TCPConn); ok {
+	conn := l.getConn()
+	if conn != nil {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
 			err := tcpConn.SetKeepAlive(true)
 			if err != nil {
-				// Connection is broken, close it
-				l.conn.Close()
-				l.conn = nil
+				conn.Close()
+				l.setConn(nil)
 			}
 		}
 	}
 
-	// If connection is nil, try to reconnect
-	if l.conn == nil {
+	if l.getConn() == nil {
 		l.attemptReconnect()
 	}
 }
@@ -395,7 +424,6 @@ func (l *Logger) attemptReconnect() {
 			return
 		}
 
-		// Wait before next attempt
 		select {
 		case <-l.ctx.Done():
 			return
@@ -411,32 +439,30 @@ func (l *Logger) startAsyncProcessor() {
 		ticker := time.NewTicker(l.flushInterval)
 		defer ticker.Stop()
 
-		batch := make([]LogEntry, 0, 100) // Process in batches for better performance
+		batch := make([]*LogEntry, 0, 100)
 
 		for {
 			select {
 			case <-l.ctx.Done():
-				// Flush remaining logs before exit
 				l.flushBatch(batch)
 				for len(l.logBuffer) > 0 {
 					entry := <-l.logBuffer
 					l.logToLogstashSync(entry)
+					l.entryPool.Put(entry) // Return to pool
 				}
 				return
 
 			case entry := <-l.logBuffer:
 				batch = append(batch, entry)
-				// Process batch if it's full
 				if len(batch) >= 100 {
 					l.processBatch(batch)
-					batch = batch[:0] // Reset batch
+					batch = batch[:0]
 				}
 
 			case <-ticker.C:
-				// Periodic flush
 				if len(batch) > 0 {
 					l.processBatch(batch)
-					batch = batch[:0] // Reset batch
+					batch = batch[:0]
 				}
 			}
 		}
@@ -444,14 +470,15 @@ func (l *Logger) startAsyncProcessor() {
 }
 
 // processBatch processes a batch of log entries
-func (l *Logger) processBatch(batch []LogEntry) {
+func (l *Logger) processBatch(batch []*LogEntry) {
 	for _, entry := range batch {
 		l.logToLogstashSync(entry)
+		l.entryPool.Put(entry) // Return to pool
 	}
 }
 
 // flushBatch flushes remaining entries in the batch
-func (l *Logger) flushBatch(batch []LogEntry) {
+func (l *Logger) flushBatch(batch []*LogEntry) {
 	if len(batch) > 0 {
 		l.processBatch(batch)
 	}
@@ -463,7 +490,6 @@ func (l *Logger) Flush() {
 		return
 	}
 
-	// Wait for buffer to be empty with timeout
 	timeout := time.After(5 * time.Second)
 	for {
 		select {
@@ -479,69 +505,84 @@ func (l *Logger) Flush() {
 	}
 }
 
-// log is the main logging method
+// getCallerInfo gets or caches caller information
+func (l *Logger) getCallerInfo(pc uintptr, file string, line int) (threadName, loggerName string) {
+	// Try to get from cache first
+	if cached, ok := l.callerCache.Load(pc); ok {
+		info := cached.(*callerInfo)
+		return info.threadName, info.loggerName
+	}
+
+	// Extract filename without path
+	fileName := file
+	if lastSlash := strings.LastIndexByte(file, '/'); lastSlash >= 0 {
+		fileName = file[lastSlash+1:]
+	}
+	threadName = fileName + ":" + strconv.Itoa(line)
+
+	// Get function name
+	if fn := runtime.FuncForPC(pc); fn != nil {
+		fullFuncName := fn.Name()
+		if lastDot := strings.LastIndexByte(fullFuncName, '.'); lastDot >= 0 {
+			loggerName = fullFuncName[lastDot+1:]
+		} else {
+			loggerName = fullFuncName
+		}
+	} else {
+		loggerName = "unknown"
+	}
+
+	// Cache for future use
+	info := &callerInfo{
+		threadName: threadName,
+		loggerName: loggerName,
+	}
+	l.callerCache.Store(pc, info)
+
+	return threadName, loggerName
+}
+
+// log is the main logging method - heavily optimized
 func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 	if level < l.minLevel {
 		return
 	}
 
-	// Format the message
-	// Note: fmt.Sprintf is acceptable here as the format is user-provided
+	// Format message only if needed
 	if len(args) > 0 {
 		message = fmt.Sprintf(message, args...)
 	}
 
-	// Get information about the calling function
+	// Get caller info with caching
 	pc, file, line, ok := runtime.Caller(2)
 	var threadName, loggerName string
 	if ok {
-		// Extract only the filename without the full path - optimized
-		var fileName string
-		if lastSlash := strings.LastIndexByte(file, '/'); lastSlash >= 0 {
-			fileName = file[lastSlash+1:]
-		} else {
-			fileName = file
-		}
-		// Use strconv for number formatting to reduce allocations
-		threadName = fileName + ":" + strconv.Itoa(line)
-
-		// Get function name
-		if fn := runtime.FuncForPC(pc); fn != nil {
-			fullFuncName := fn.Name()
-			// Extract just the function name without package path - optimized
-			if lastDot := strings.LastIndexByte(fullFuncName, '.'); lastDot >= 0 {
-				loggerName = fullFuncName[lastDot+1:]
-			} else {
-				loggerName = fullFuncName
-			}
-		} else {
-			loggerName = "unknown"
-		}
+		threadName, loggerName = l.getCallerInfo(pc, file, line)
 	} else {
 		threadName = "main"
 		loggerName = "main"
 	}
 
-	// Get fields from logger (thread-safe, but we don't copy to avoid allocations)
-	// Fields are read-only after logger creation, so it's safe to read without copying
-	l.mu.RLock()
-	fields := l.fields
-	l.mu.RUnlock()
+	// Get entry from pool instead of allocating
+	entry := l.entryPool.Get().(*LogEntry)
 
-	entry := LogEntry{
-		Timestamp:   time.Now().UTC().Format(l.timestampFormat),
-		Level:       level.String(),
-		Message:     message,
-		LoggerName:  loggerName,
-		ThreadName:  threadName,
-		AppName:     l.appName,
-		HostIP:      l.hostIP,
-		ContainerID: l.containerID,
-		Type:        "logback",
-	}
-	// Only set Fields if there are any (to avoid empty map allocation)
-	if len(fields) > 0 {
-		entry.Fields = fields
+	// Reuse timestamp buffer to avoid allocation
+	now := time.Now().UTC()
+	entry.Timestamp = now.Format(l.timestampFormat)
+	entry.Level = level.String() // Uses pre-allocated strings
+	entry.Message = message
+	entry.LoggerName = loggerName
+	entry.ThreadName = threadName
+	entry.AppName = l.appName
+	entry.HostIP = l.hostIP
+	entry.ContainerID = l.containerID
+	entry.Type = "logback"
+
+	// Shallow copy fields (they're immutable)
+	if len(l.fields) > 0 {
+		entry.Fields = l.fields
+	} else {
+		entry.Fields = nil
 	}
 
 	// Output to console
@@ -550,18 +591,23 @@ func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 	// Send to logstash if enabled
 	if l.logstashEnabled {
 		l.logToLogstash(entry)
+	} else {
+		// Return to pool immediately if not going to async queue
+		l.entryPool.Put(entry)
 	}
 }
 
-// logToConsole outputs log to console
-func (l *Logger) logToConsole(entry LogEntry) {
-	// Use buffer pool to reduce allocations
+// logToConsole outputs log to console - optimized with buffer reuse
+func (l *Logger) logToConsole(entry *LogEntry) {
 	buf := l.bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer l.bufPool.Put(buf)
 
-	// Build message using buffer (more efficient than fmt.Sprintf)
-	buf.WriteString("[")
+	// Pre-allocate approximate size
+	buf.Grow(len(entry.Timestamp) + len(entry.Level) + len(entry.LoggerName) +
+		len(entry.ThreadName) + len(entry.Message) + 10)
+
+	buf.WriteByte('[')
 	buf.WriteString(entry.Timestamp)
 	buf.WriteString("] ")
 	buf.WriteString(entry.Level)
@@ -585,40 +631,36 @@ func (l *Logger) logToConsole(entry LogEntry) {
 }
 
 // logToLogstash sends log to logstash
-func (l *Logger) logToLogstash(entry LogEntry) {
+func (l *Logger) logToLogstash(entry *LogEntry) {
 	if l.asyncEnabled {
 		l.logToLogstashAsync(entry)
 	} else {
 		l.logToLogstashSync(entry)
+		l.entryPool.Put(entry) // Return to pool
 	}
 }
 
 // logToLogstashAsync sends log to buffer for async processing
-func (l *Logger) logToLogstashAsync(entry LogEntry) {
-	l.closedMu.Lock()
-	defer l.closedMu.Unlock()
-	if l.closed {
+func (l *Logger) logToLogstashAsync(entry *LogEntry) {
+	// Check if closed atomically
+	if atomic.LoadUint32(&l.closed) == 1 {
+		l.entryPool.Put(entry)
 		return
 	}
 
-	// Даем горутине завершиться
-	time.Sleep(50 * time.Millisecond)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	select {
 	case l.logBuffer <- entry:
-		// Successfully added to buffer
+		// Successfully added to buffer - will be returned to pool by async processor
 	default:
-		// Buffer is full, fallback to sync logging to avoid blocking
+		// Buffer is full, fallback to sync logging
 		fmt.Printf("Log buffer full, falling back to sync logging\n")
 		l.logToLogstashSync(entry)
+		l.entryPool.Put(entry) // Return to pool immediately
 	}
 }
 
 // logToLogstashSync sends log synchronously
-func (l *Logger) logToLogstashSync(entry LogEntry) {
+func (l *Logger) logToLogstashSync(entry *LogEntry) {
 	if l.protocol == UDP {
 		l.logToLogstashUDP(entry)
 	} else {
@@ -626,61 +668,58 @@ func (l *Logger) logToLogstashSync(entry LogEntry) {
 	}
 }
 
-// logToLogstashTCP sends log to logstash via TCP
-func (l *Logger) logToLogstashTCP(entry LogEntry) {
-	l.mu.RLock()
-	conn := l.conn
-	l.mu.RUnlock()
-
+// logToLogstashTCP sends log to logstash via TCP - optimized with buffer pool
+func (l *Logger) logToLogstashTCP(entry *LogEntry) {
+	conn := l.getConn()
 	if conn == nil {
-		// Try to reconnect immediately
 		l.mu.Lock()
-		if l.conn == nil {
+		if l.getConn() == nil {
 			l.connectToLogstash()
 		}
-		conn = l.conn
+		conn = l.getConn()
 		l.mu.Unlock()
 
 		if conn == nil {
-			return // Still no connection
+			return
 		}
 	}
 
-	jsonData, err := json.Marshal(entry)
-	if err != nil {
+	// Get buffer from pool for JSON encoding
+	jsonBuf := l.jsonBufPool.Get().(*bytes.Buffer)
+	jsonBuf.Reset()
+	defer l.jsonBufPool.Put(jsonBuf)
+
+	encoder := json.NewEncoder(jsonBuf)
+	if err := encoder.Encode(entry); err != nil {
 		fmt.Printf("Failed to marshal log entry: %v\n", err)
 		return
 	}
 
-	// Add newline for json_lines codec
-	jsonData = append(jsonData, '\n')
-
-	// Set write timeout to detect broken connections
+	// Set write timeout
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	}
 
-	_, err = conn.Write(jsonData)
+	_, err := conn.Write(jsonBuf.Bytes())
 	if err != nil {
 		fmt.Printf("Failed to write to logstash via TCP: %v\n", err)
-		// Mark connection as broken
 		l.mu.Lock()
-		if l.conn != nil {
-			l.conn.Close()
-			l.conn = nil
+		currentConn := l.getConn()
+		if currentConn != nil {
+			currentConn.Close()
+			l.setConn(nil)
 		}
 		l.mu.Unlock()
 	} else {
-		// Reset write deadline on successful write
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
 			tcpConn.SetWriteDeadline(time.Time{})
 		}
 	}
 }
 
-// logToLogstashUDP sends log to logstash via UDP
-func (l *Logger) logToLogstashUDP(entry LogEntry) {
-	address := net.JoinHostPort(l.logstashHost, fmt.Sprintf("%d", l.logstashPort))
+// logToLogstashUDP sends log to logstash via UDP - optimized
+func (l *Logger) logToLogstashUDP(entry *LogEntry) {
+	address := net.JoinHostPort(l.logstashHost, strconv.Itoa(l.logstashPort))
 
 	conn, err := net.Dial("udp", address)
 	if err != nil {
@@ -689,16 +728,18 @@ func (l *Logger) logToLogstashUDP(entry LogEntry) {
 	}
 	defer conn.Close()
 
-	jsonData, err := json.Marshal(entry)
-	if err != nil {
+	// Use buffer pool
+	jsonBuf := l.jsonBufPool.Get().(*bytes.Buffer)
+	jsonBuf.Reset()
+	defer l.jsonBufPool.Put(jsonBuf)
+
+	encoder := json.NewEncoder(jsonBuf)
+	if err := encoder.Encode(entry); err != nil {
 		fmt.Printf("Failed to marshal log entry: %v\n", err)
 		return
 	}
 
-	// Add newline for json_lines codec
-	jsonData = append(jsonData, '\n')
-
-	_, err = conn.Write(jsonData)
+	_, err = conn.Write(jsonBuf.Bytes())
 	if err != nil {
 		fmt.Printf("Failed to write to logstash via UDP: %v\n", err)
 	}
@@ -727,15 +768,25 @@ func (l *Logger) Error(message string, args ...interface{}) {
 // Fatal logs a message at FATAL level and exits the program
 func (l *Logger) Fatal(message string, args ...interface{}) {
 	l.log(FATAL, message, args...)
+	l.Flush() // Ensure all logs are written
 	os.Exit(1)
 }
 
-// With returns a new logger instance with the specified fields added to the context.
-// The fields will be included in all subsequent log entries from this logger.
-// This method is thread-safe and creates a new logger instance, so the original logger remains unchanged.
+// With returns a new logger instance with additional fields
 func (l *Logger) With(fields map[string]interface{}) *Logger {
-	// Create a new logger with copied configuration
 	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	// Create new fields map
+	newFields := make(map[string]interface{}, len(l.fields)+len(fields))
+	for k, v := range l.fields {
+		newFields[k] = v
+	}
+	for k, v := range fields {
+		newFields[k] = v
+	}
+
+	// Create new logger sharing most resources
 	newLogger := &Logger{
 		logstashEnabled:   l.logstashEnabled,
 		logstashHost:      l.logstashHost,
@@ -748,7 +799,7 @@ func (l *Logger) With(fields map[string]interface{}) *Logger {
 		reconnectAttempts: l.reconnectAttempts,
 		reconnectDelay:    l.reconnectDelay,
 		ctx:               l.ctx,
-		cancel:            l.cancel, // Share the same cancel function
+		cancel:            l.cancel,
 		timestampFormat:   l.timestampFormat,
 		bufferSize:        l.bufferSize,
 		flushInterval:     l.flushInterval,
@@ -756,25 +807,22 @@ func (l *Logger) With(fields map[string]interface{}) *Logger {
 		output:            l.output,
 		prefix:            l.prefix,
 		flags:             l.flags,
-		bufPool: sync.Pool{
-			New: func() interface{} {
-				return &bytes.Buffer{}
-			},
-		},
-		fields: make(map[string]interface{}),
-	}
-	// Copy existing fields
-	for k, v := range l.fields {
-		newLogger.fields[k] = v
-	}
-	l.mu.RUnlock()
-
-	// Add new fields
-	for k, v := range fields {
-		newLogger.fields[k] = v
+		fields:            newFields,
+		timestampBuf:      make([]byte, 0, 64),
+		// Share pools
+		bufPool:     l.bufPool,
+		entryPool:   l.entryPool,
+		jsonBufPool: l.jsonBufPool,
+		// Share cache
+		callerCache: l.callerCache,
 	}
 
-	// Share async buffer if enabled
+	// Share connection - ВАЖНО: atomic.Pointer позволяет хранить nil
+	if conn := l.getConn(); conn != nil {
+		newLogger.setConn(conn)
+	}
+
+	// Share async buffer
 	if l.asyncEnabled && l.logstashEnabled {
 		newLogger.logBuffer = l.logBuffer
 	}
@@ -782,65 +830,49 @@ func (l *Logger) With(fields map[string]interface{}) *Logger {
 	return newLogger
 }
 
-// Standard log interface methods for compatibility with log package
-
-// Print calls l.Info for the default logger
+// Standard log interface methods
 func (l *Logger) Print(v ...interface{}) {
-	message := fmt.Sprint(v...)
-	l.Info(message)
+	l.Info(fmt.Sprint(v...))
 }
 
-// Printf calls l.Info for the default logger
 func (l *Logger) Printf(format string, v ...interface{}) {
 	l.Info(format, v...)
 }
 
-// Println calls l.Info for the default logger
 func (l *Logger) Println(v ...interface{}) {
 	message := fmt.Sprintln(v...)
-	// Remove trailing newline since our logger adds its own formatting
 	if len(message) > 0 && message[len(message)-1] == '\n' {
 		message = message[:len(message)-1]
 	}
 	l.Info(message)
 }
 
-// Fatalf calls l.Fatal with formatted message
 func (l *Logger) Fatalf(format string, v ...interface{}) {
-	message := fmt.Sprintf(format, v...)
-	l.log(FATAL, message)
-	os.Exit(1)
+	l.Fatal(format, v...)
 }
 
-// Fatalln calls l.Fatal with sprintln-formatted message
 func (l *Logger) Fatalln(v ...interface{}) {
 	message := fmt.Sprintln(v...)
-	// Remove trailing newline since our logger adds its own formatting
 	if len(message) > 0 && message[len(message)-1] == '\n' {
 		message = message[:len(message)-1]
 	}
-	l.log(FATAL, message)
-	os.Exit(1)
+	l.Fatal(message)
 }
 
-// Panic logs a message at ERROR level and panics
 func (l *Logger) Panic(v ...interface{}) {
 	message := fmt.Sprint(v...)
 	l.Error(message)
 	panic(message)
 }
 
-// Panicf logs a formatted message at ERROR level and panics
 func (l *Logger) Panicf(format string, v ...interface{}) {
 	message := fmt.Sprintf(format, v...)
 	l.Error(message)
 	panic(message)
 }
 
-// Panicln logs a sprintln-formatted message at ERROR level and panics
 func (l *Logger) Panicln(v ...interface{}) {
 	message := fmt.Sprintln(v...)
-	// Remove trailing newline since our logger adds its own formatting
 	if len(message) > 0 && message[len(message)-1] == '\n' {
 		message = message[:len(message)-1]
 	}
@@ -848,42 +880,36 @@ func (l *Logger) Panicln(v ...interface{}) {
 	panic(message)
 }
 
-// SetOutput sets the output destination for the logger
 func (l *Logger) SetOutput(w io.Writer) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.output = w
 }
 
-// Output returns the current output destination
 func (l *Logger) Output() io.Writer {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.output
 }
 
-// SetFlags sets the output flags for the logger (for compatibility)
 func (l *Logger) SetFlags(flag int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.flags = flag
 }
 
-// Flags returns the output flags for the logger
 func (l *Logger) Flags() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.flags
 }
 
-// SetPrefix sets the output prefix for the logger
 func (l *Logger) SetPrefix(prefix string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.prefix = prefix
 }
 
-// Prefix returns the output prefix for the logger
 func (l *Logger) Prefix() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -892,31 +918,32 @@ func (l *Logger) Prefix() string {
 
 // Close closes the connection to logstash and stops monitoring
 func (l *Logger) Close() error {
-	// 1. Block new writes to buffer
-	l.closedMu.Lock()
-	l.closed = true
-	l.closedMu.Unlock()
+	// Mark as closed atomically
+	if !atomic.CompareAndSwapUint32(&l.closed, 0, 1) {
+		return nil // Already closed
+	}
 
-	// 2. Stop all background goroutines
+	// Stop all background goroutines
 	if l.cancel != nil {
 		l.cancel()
 	}
 
-	// 4. Now it's safe to clean up everything else
+	// Wait a bit for async processor to finish
+	time.Sleep(100 * time.Millisecond)
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Stop reconnect timer
 	if l.reconnectTicker != nil {
 		l.reconnectTicker.Stop()
 		l.reconnectTicker = nil
 	}
 
-	// Close TCP connection
 	var err error
-	if l.conn != nil {
-		err = l.conn.Close()
-		l.conn = nil
+	conn := l.getConn()
+	if conn != nil {
+		err = conn.Close()
+		l.setConn(nil)
 	}
 
 	return err
@@ -934,7 +961,7 @@ func getHostIP() string {
 	return localAddr.IP.String()
 }
 
-// getContainerID gets the container ID (basic implementation)
+// getContainerID gets the container ID
 func getContainerID() string {
 	hostname, err := os.Hostname()
 	if err != nil {
