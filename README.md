@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/SergeyDavidenko/logger/actions/workflows/ci.yml/badge.svg)]
+[![CI](https://github.com/SergeyDavidenko/logger/workflows/CI/badge.svg)](https://github.com/SergeyDavidenko/logger/actions)
 [![Coverage](https://codecov.io/gh/SergeyDavidenko/logger/branch/main/graph/badge.svg)](https://codecov.io/gh/SergeyDavidenko/logger)
 [![Go Report Card](https://goreportcard.com/badge/github.com/SergeyDavidenko/logger)](https://goreportcard.com/report/github.com/SergeyDavidenko/logger)
 [![go.dev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/SergeyDavidenko/logger)
