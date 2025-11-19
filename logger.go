@@ -118,6 +118,9 @@ type Logger struct {
 	bufPool sync.Pool
 	// Context fields for structured logging
 	fields map[string]interface{}
+	// Closed flag to prevent double close
+	closed   bool
+	closedMu sync.Mutex
 }
 
 // Protocol represents the network protocol type
@@ -592,6 +595,18 @@ func (l *Logger) logToLogstash(entry LogEntry) {
 
 // logToLogstashAsync sends log to buffer for async processing
 func (l *Logger) logToLogstashAsync(entry LogEntry) {
+	l.closedMu.Lock()
+	defer l.closedMu.Unlock()
+	if l.closed {
+		return
+	}
+
+	// Даем горутине завершиться
+	time.Sleep(50 * time.Millisecond)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	select {
 	case l.logBuffer <- entry:
 		// Successfully added to buffer
@@ -877,38 +892,34 @@ func (l *Logger) Prefix() string {
 
 // Close closes the connection to logstash and stops monitoring
 func (l *Logger) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	// 1. Block new writes to buffer
+	l.closedMu.Lock()
+	l.closed = true
+	l.closedMu.Unlock()
 
-	// Flush remaining logs if async is enabled
-	if l.asyncEnabled {
-		l.Flush()
-	}
-
-	// Stop the async processor and reconnect monitor
+	// 2. Stop all background goroutines
 	if l.cancel != nil {
 		l.cancel()
 	}
 
+	// 4. Now it's safe to clean up everything else
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Stop reconnect timer
 	if l.reconnectTicker != nil {
 		l.reconnectTicker.Stop()
 		l.reconnectTicker = nil
 	}
 
-	// Close the log buffer channel
-	if l.logBuffer != nil {
-		close(l.logBuffer)
-		l.logBuffer = nil
-	}
-
-	// Close the connection
+	// Close TCP connection
+	var err error
 	if l.conn != nil {
-		err := l.conn.Close()
+		err = l.conn.Close()
 		l.conn = nil
-		return err
 	}
 
-	return nil
+	return err
 }
 
 // getHostIP gets the host IP address
