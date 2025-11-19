@@ -2,8 +2,9 @@
 
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Coverage](https://codecov.io/gh/SergeyDavidenko/logger/branch/main/graph/badge.svg)](https://codecov.io/gh/SergeyDavidenko/logger)
 [![Go Report Card](https://goreportcard.com/badge/github.com/SergeyDavidenko/logger)](https://goreportcard.com/report/github.com/SergeyDavidenko/logger)
-[![GoDoc](https://godoc.org/github.com/SergeyDavidenko/logger?status.svg)](https://godoc.org/github.com/SergeyDavidenko/logger)
+[![go.dev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/SergeyDavidenko/logger)
 
 A high-performance, production-ready Go logging library with native Logstash integration. Designed for modern applications that need reliable, fast, and feature-rich logging capabilities.
 
@@ -65,6 +66,7 @@ func main() {
 - Caller information display (filename:line)
 - Configurable buffer size and flush intervals
 - Batch processing for optimal network usage
+- **Structured logging with `With()` method** - add context fields to loggers
 
 ## Usage
 
@@ -122,6 +124,23 @@ func main() {
     
     // Force flush of buffered logs (async mode only)
     log.Flush()
+    
+    // Structured logging with context fields
+    loggerWithFields := log.With(map[string]interface{}{
+        "user_id":    123,
+        "request_id": "req-456",
+        "service":    "api",
+        "trace_id":    "abc123",
+    })
+    loggerWithFields.Info("User action completed")
+    // Fields will be included in JSON output sent to Logstash
+    
+    // Nested context fields
+    requestLogger := loggerWithFields.With(map[string]interface{}{
+        "endpoint": "/api/users",
+        "method":   "GET",
+    })
+    requestLogger.Info("Request processed")
 }
 
 // Example functions to demonstrate automatic function name capture
@@ -299,6 +318,9 @@ Closes the connection to Logstash.
 
 #### (l *Logger) Flush()
 Forces immediate flush of all buffered logs (async mode only).
+
+#### (l *Logger) With(fields map[string]interface{}) *Logger
+Returns a new logger instance with the specified fields added to the context. The fields will be included in all subsequent log entries from this logger. This method is thread-safe and creates a new logger instance, so the original logger remains unchanged.
 
 ## Performance & Asynchronous Logging
 
@@ -601,9 +623,70 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📊 Benchmarks
 
+Performance comparison with popular Go logging libraries. All benchmarks use `io.Discard` to suppress output and async logging is disabled for fair comparison.
+
+### Log a message and 10 fields
+
+Benchmark results for logging a message with 10 fields.
+
+| Package | Time | Time % to zap | Objects Allocated |
+|---------|------|---------------|-------------------|
+| ⚡ zerolog | 45.02 ns/op | -76% | 0 allocs/op |
+| ⚡ zap | 190.4 ns/op | +0% | 0 allocs/op |
+| apex/log | 408.1 ns/op | +114% | 6 allocs/op |
+| **logger (this package)** | **653.7 ns/op** | **+243%** | **5 allocs/op** |
+| zap (sugared) | 693.2 ns/op | +264% | 1 allocs/op |
+| slog (LogAttrs) | 772.0 ns/op | +305% | 1 allocs/op |
+| slog | 800.3 ns/op | +320% | 1 allocs/op |
+| go-kit | 1465 ns/op | +669% | 29 allocs/op |
+| log15 | 2658 ns/op | +1296% | 42 allocs/op |
+| logrus | 2819 ns/op | +1379% | 52 allocs/op |
+
+**Analysis:**
+- This logger ranks **4th** out of 10 tested loggers
+- Execution time: 653.7 ns/op
+- Memory allocations: 5 allocs/op
+- Faster than slog, zap (sugared), go-kit, log15, and logrus
+- Comparable performance to slog and zap (sugared)
+
+### Log a message with a logger that already has 10 fields of context
+
+Benchmark results for logging a message when the logger already has 10 fields of context pre-configured using `With()`.
+
+| Package | Time | Time % to zap | Objects Allocated |
+|---------|------|---------------|-------------------|
+| ⚡ zerolog | 44.36 ns/op | -78% | 0 allocs/op |
+| ⚡ zap | 201.0 ns/op | +0% | 0 allocs/op |
+| ⚡ zap (sugared) | 217.6 ns/op | +8% | 0 allocs/op |
+| slog | 299.7 ns/op | +49% | 0 allocs/op |
+| slog (LogAttrs) | 301.8 ns/op | +50% | 0 allocs/op |
+| apex/log | 405.8 ns/op | +102% | 6 allocs/op |
+| **logger (this package)** | **465.9 ns/op** | **+132%** | **5 allocs/op** |
+| go-kit | 1496 ns/op | +645% | 29 allocs/op |
+| logrus | 2295 ns/op | +1042% | 43 allocs/op |
+| log15 | 2802 ns/op | +1294% | 41 allocs/op |
+
+**Analysis:**
+- This logger ranks **7th** out of 10 tested loggers when logging with pre-configured context
+- Execution time: 465.9 ns/op
+- Memory allocations: 5 allocs/op
+- Faster than go-kit, log15, and logrus
+- Comparable performance to apex/log (only 15% slower)
+- Full support for structured logging with `With()` method
+
+### Running Benchmarks
+
+```bash
+cd benchmarks
+go test -bench=. -benchmem -run=XXX
 ```
-BenchmarkLogger_Info-12          1000000              1160 ns/op             432 B/op         13 allocs/op
+
+To run only this logger:
+```bash
+go test -bench=BenchmarkLogger -benchmem -run=XXX
 ```
+
+For detailed benchmark results and analysis, see [benchmarks/README.md](benchmarks/README.md).
 
 *Benchmarks run on Go 1.25.0, macOS, Apple M3 Pro (12 cores), 18 GB RAM*
 

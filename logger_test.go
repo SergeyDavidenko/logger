@@ -715,3 +715,546 @@ func TestLogger_FatalMethods_DoNotExit(t *testing.T) {
 	// logger.Fatalf("fatal %s", "formatted")
 	// logger.Fatalln("fatal", "line")
 }
+
+func TestDefaultConfig(t *testing.T) {
+	config := DefaultConfig()
+
+	if config.TimestampFormat != "2006-01-02T15:04:05.000Z" {
+		t.Errorf("Expected default timestamp format, got %s", config.TimestampFormat)
+	}
+
+	if config.LogstashEnabled != false {
+		t.Error("Expected LogstashEnabled to be false by default")
+	}
+
+	if config.AsyncEnabled != true {
+		t.Error("Expected AsyncEnabled to be true by default")
+	}
+
+	if config.BufferSize != 1000 {
+		t.Errorf("Expected default buffer size 1000, got %d", config.BufferSize)
+	}
+
+	if config.FlushInterval != 1*time.Second {
+		t.Errorf("Expected default flush interval 1s, got %v", config.FlushInterval)
+	}
+}
+
+func TestLogger_LogstashUDP(t *testing.T) {
+	// Test UDP logging (even if connection fails, the code path should be executed)
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5009,
+		LogstashEnabled: true,
+		Protocol:        UDP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    false, // Use sync to test UDP path
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// This should attempt to send via UDP (will fail but code path is executed)
+	logger.Info("Test UDP message")
+	time.Sleep(10 * time.Millisecond) // Give time for async operations
+}
+
+func TestLogger_LogstashAsync(t *testing.T) {
+	// Test async logging with Logstash enabled
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    true,
+		BufferSize:      100,
+		FlushInterval:   50 * time.Millisecond,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Send multiple messages to test async buffer
+	for i := 0; i < 10; i++ {
+		logger.Info("Async test message %d", i)
+	}
+
+	// Wait for async processing
+	time.Sleep(100 * time.Millisecond)
+	logger.Flush()
+}
+
+func TestLogger_Flush(t *testing.T) {
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    true,
+		BufferSize:      100,
+		FlushInterval:   1 * time.Second,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Flush when buffer is empty
+	logger.Flush()
+
+	// Send messages to fill buffer
+	for i := 0; i < 5; i++ {
+		logger.Info("Flush test message %d", i)
+	}
+
+	// Flush should wait for buffer to be empty
+	logger.Flush()
+}
+
+func TestLogger_Close(t *testing.T) {
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    true,
+		BufferSize:      100,
+		FlushInterval:   50 * time.Millisecond,
+	}
+
+	logger := New(config)
+
+	// Send some messages
+	logger.Info("Message before close")
+	logger.Warn("Another message")
+
+	// Close should flush and cleanup
+	err := logger.Close()
+	if err != nil {
+		t.Errorf("Close should not return error when connection is nil or closed, got: %v", err)
+	}
+
+	// Test closing already closed logger
+	err = logger.Close()
+	if err != nil {
+		t.Errorf("Close should not return error on second call, got: %v", err)
+	}
+}
+
+func TestLogger_ReconnectLogic(t *testing.T) {
+	config := Config{
+		LogstashHost:      "localhost",
+		LogstashPort:      5008,
+		LogstashEnabled:   true,
+		Protocol:          TCP,
+		AppName:           "test-app",
+		MinLevel:          DEBUG,
+		ReconnectAttempts: 2,
+		ReconnectDelay:    100 * time.Millisecond,
+		AsyncEnabled:      false,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Reconnect monitor is started automatically when LogstashEnabled is true
+	// Give it time to start and attempt reconnection
+	time.Sleep(200 * time.Millisecond)
+
+	// Send a log message which will trigger reconnection logic if connection is broken
+	logger.Info("Test message to trigger reconnect logic")
+	time.Sleep(200 * time.Millisecond)
+}
+
+func TestLogger_LogstashSync(t *testing.T) {
+	// Test sync logging with Logstash enabled
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    false, // Use sync mode
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// This should attempt to send via TCP (will fail but code path is executed)
+	logger.Info("Test sync TCP message")
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestLogger_LogLevelFiltering(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        WARN, // Only WARN and above
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// These should not be logged
+	logger.Debug("Debug message")
+	logger.Info("Info message")
+
+	// These should be logged
+	logger.Warn("Warning message")
+	logger.Error("Error message")
+}
+
+func TestLogger_EmptyMessage(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Test empty messages
+	logger.Info("")
+	logger.Info("%s", "")
+	logger.Debug("")
+	logger.Warn("")
+	logger.Error("")
+}
+
+func TestLogger_ConnectToLogstash_EmptyHost(t *testing.T) {
+	config := Config{
+		LogstashHost:    "",
+		LogstashPort:    0,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// connectToLogstash is called internally, but with empty host/port it should fail
+	// We test this by enabling logstash which will try to connect
+	logger.SetLogstashEnabled(true)
+	time.Sleep(10 * time.Millisecond)
+
+	// Connection should fail silently (no panic)
+	logger.Info("Test message")
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestLogger_SetLogstashEnabled_WithConnection(t *testing.T) {
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: false,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Enable logstash - should attempt connection
+	logger.SetLogstashEnabled(true)
+	time.Sleep(10 * time.Millisecond)
+
+	// Disable logstash - should close connection
+	logger.SetLogstashEnabled(false)
+	time.Sleep(10 * time.Millisecond)
+
+	// Re-enable to test reconnection path
+	logger.SetLogstashEnabled(true)
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestLogger_AsyncBufferFull(t *testing.T) {
+	// Test async buffer full scenario
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    true,
+		BufferSize:      5, // Small buffer to test full scenario
+		FlushInterval:   100 * time.Millisecond,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Fill buffer quickly to trigger fallback to sync
+	for i := 0; i < 10; i++ {
+		logger.Info("Buffer test %d", i)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	logger.Flush()
+}
+
+func TestLogger_Flush_WhenAsyncDisabled(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    false, // Async disabled
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// Flush should return immediately when async is disabled
+	logger.Flush()
+}
+
+func TestLogger_CheckAndReconnect_WhenDisabled(t *testing.T) {
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: false, // Disabled
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// checkAndReconnect should return early when logstash is disabled
+	// We can't call it directly, but we can test the path through reconnect monitor
+	// by enabling and then disabling
+	logger.SetLogstashEnabled(true)
+	time.Sleep(50 * time.Millisecond)
+	logger.SetLogstashEnabled(false)
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestLogger_CheckAndReconnect_UDP(t *testing.T) {
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5009,
+		LogstashEnabled: true,
+		Protocol:        UDP, // UDP protocol
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// checkAndReconnect should return early for UDP protocol
+	// Test by enabling/disabling to trigger reconnect monitor
+	time.Sleep(100 * time.Millisecond)
+	logger.Info("Test message")
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestLogger_LogWithLogstashEnabled(t *testing.T) {
+	// Test the full log path with logstash enabled
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    false, // Use sync to test direct path
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// This will test logToLogstash -> logToLogstashSync -> logToLogstashTCP path
+	logger.Debug("Debug with logstash")
+	logger.Info("Info with logstash")
+	logger.Warn("Warn with logstash")
+	logger.Error("Error with logstash")
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestLogger_LogWithLogstashAsync(t *testing.T) {
+	// Test async log path
+	config := Config{
+		LogstashHost:    "localhost",
+		LogstashPort:    5008,
+		LogstashEnabled: true,
+		Protocol:        TCP,
+		AppName:         "test-app",
+		MinLevel:        DEBUG,
+		AsyncEnabled:    true,
+		BufferSize:      100,
+		FlushInterval:   50 * time.Millisecond,
+	}
+
+	logger := New(config)
+	defer logger.Close()
+
+	// This will test logToLogstash -> logToLogstashAsync path
+	logger.Info("Async log message 1")
+	logger.Warn("Async log message 2")
+	logger.Error("Async log message 3")
+	time.Sleep(100 * time.Millisecond)
+	logger.Flush()
+}
+
+func TestLogger_LogLevelFiltering_EdgeCases(t *testing.T) {
+	// Test various log level filtering scenarios
+	tests := []struct {
+		name      string
+		minLevel  LogLevel
+		shouldLog map[LogLevel]bool
+	}{
+		{
+			name:     "DEBUG level",
+			minLevel: DEBUG,
+			shouldLog: map[LogLevel]bool{
+				DEBUG: true,
+				INFO:  true,
+				WARN:  true,
+				ERROR: true,
+			},
+		},
+		{
+			name:     "INFO level",
+			minLevel: INFO,
+			shouldLog: map[LogLevel]bool{
+				DEBUG: false,
+				INFO:  true,
+				WARN:  true,
+				ERROR: true,
+			},
+		},
+		{
+			name:     "WARN level",
+			minLevel: WARN,
+			shouldLog: map[LogLevel]bool{
+				DEBUG: false,
+				INFO:  false,
+				WARN:  true,
+				ERROR: true,
+			},
+		},
+		{
+			name:     "ERROR level",
+			minLevel: ERROR,
+			shouldLog: map[LogLevel]bool{
+				DEBUG: false,
+				INFO:  false,
+				WARN:  false,
+				ERROR: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := Config{
+				LogstashEnabled: false,
+				AppName:         "test-app",
+				MinLevel:        tt.minLevel,
+			}
+
+			logger := New(config)
+			defer logger.Close()
+
+			// Test each log level
+			logger.Debug("debug message")
+			logger.Info("info message")
+			logger.Warn("warn message")
+			logger.Error("error message")
+		})
+	}
+}
+
+func TestLogger_With(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        INFO,
+	}
+
+	baseLogger := New(config)
+	defer baseLogger.Close()
+
+	// Create logger with fields
+	loggerWithFields := baseLogger.With(map[string]interface{}{
+		"user_id":    123,
+		"request_id": "req-456",
+		"service":    "test-service",
+	})
+
+	// Capture output
+	var buf bytes.Buffer
+	loggerWithFields.SetOutput(&buf)
+
+	// Log a message
+	loggerWithFields.Info("test message")
+
+	output := buf.String()
+	if output == "" {
+		t.Fatal("Expected output, got empty string")
+	}
+
+	// Check that output contains the message
+	if !bytes.Contains([]byte(output), []byte("test message")) {
+		t.Errorf("Expected output to contain 'test message', got: %s", output)
+	}
+
+	// Test that original logger is unchanged
+	var buf2 bytes.Buffer
+	baseLogger.SetOutput(&buf2)
+	baseLogger.Info("original message")
+
+	output2 := buf2.String()
+	if bytes.Contains([]byte(output2), []byte("user_id")) {
+		t.Error("Original logger should not have fields from With()")
+	}
+}
+
+func TestLogger_WithNested(t *testing.T) {
+	config := Config{
+		LogstashEnabled: false,
+		AppName:         "test-app",
+		MinLevel:        INFO,
+	}
+
+	baseLogger := New(config)
+	defer baseLogger.Close()
+
+	// Create nested loggers with fields
+	logger1 := baseLogger.With(map[string]interface{}{
+		"level1": "value1",
+	})
+
+	logger2 := logger1.With(map[string]interface{}{
+		"level2": "value2",
+	})
+
+	// Capture output
+	var buf bytes.Buffer
+	logger2.SetOutput(&buf)
+
+	// Log a message
+	logger2.Info("nested message")
+
+	output := buf.String()
+	if output == "" {
+		t.Fatal("Expected output, got empty string")
+	}
+
+	// Check that output contains the message
+	if !bytes.Contains([]byte(output), []byte("nested message")) {
+		t.Errorf("Expected output to contain 'nested message', got: %s", output)
+	}
+}

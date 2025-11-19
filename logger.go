@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,15 +75,16 @@ func MustParseLogLevel(level string) LogLevel {
 
 // LogEntry represents a log entry
 type LogEntry struct {
-	Timestamp   string `json:"@timestamp"`
-	Level       string `json:"level"`
-	Message     string `json:"message"`
-	LoggerName  string `json:"logger_name"`
-	ThreadName  string `json:"thread_name"`
-	AppName     string `json:"appname"`
-	HostIP      string `json:"hostip"`
-	ContainerID string `json:"containerId"`
-	Type        string `json:"type"`
+	Timestamp   string                 `json:"@timestamp"`
+	Level       string                 `json:"level"`
+	Message     string                 `json:"message"`
+	LoggerName  string                 `json:"logger_name"`
+	ThreadName  string                 `json:"thread_name"`
+	AppName     string                 `json:"appname"`
+	HostIP      string                 `json:"hostip"`
+	ContainerID string                 `json:"containerId"`
+	Type        string                 `json:"type"`
+	Fields      map[string]interface{} `json:"fields,omitempty"`
 }
 
 // Logger is the main logger structure
@@ -111,6 +114,10 @@ type Logger struct {
 	output io.Writer
 	prefix string
 	flags  int
+	// Buffer pool for optimization
+	bufPool sync.Pool
+	// Context fields for structured logging
+	fields map[string]interface{}
 }
 
 // Protocol represents the network protocol type
@@ -207,6 +214,14 @@ func New(config Config) *Logger {
 		output: os.Stderr,
 		prefix: "",
 		flags:  0,
+		// Initialize buffer pool
+		bufPool: sync.Pool{
+			New: func() interface{} {
+				return &bytes.Buffer{}
+			},
+		},
+		// Initialize fields map
+		fields: make(map[string]interface{}),
 	}
 
 	// Initialize async logging if enabled
@@ -468,6 +483,7 @@ func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 	}
 
 	// Format the message
+	// Note: fmt.Sprintf is acceptable here as the format is user-provided
 	if len(args) > 0 {
 		message = fmt.Sprintf(message, args...)
 	}
@@ -476,18 +492,21 @@ func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 	pc, file, line, ok := runtime.Caller(2)
 	var threadName, loggerName string
 	if ok {
-		// Extract only the filename without the full path
-		if lastSlash := strings.LastIndex(file, "/"); lastSlash >= 0 {
-			threadName = fmt.Sprintf("%s:%d", file[lastSlash+1:], line)
+		// Extract only the filename without the full path - optimized
+		var fileName string
+		if lastSlash := strings.LastIndexByte(file, '/'); lastSlash >= 0 {
+			fileName = file[lastSlash+1:]
 		} else {
-			threadName = fmt.Sprintf("%s:%d", file, line)
+			fileName = file
 		}
+		// Use strconv for number formatting to reduce allocations
+		threadName = fileName + ":" + strconv.Itoa(line)
 
 		// Get function name
 		if fn := runtime.FuncForPC(pc); fn != nil {
 			fullFuncName := fn.Name()
-			// Extract just the function name without package path
-			if lastDot := strings.LastIndex(fullFuncName, "."); lastDot >= 0 {
+			// Extract just the function name without package path - optimized
+			if lastDot := strings.LastIndexByte(fullFuncName, '.'); lastDot >= 0 {
 				loggerName = fullFuncName[lastDot+1:]
 			} else {
 				loggerName = fullFuncName
@@ -500,6 +519,12 @@ func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 		loggerName = "main"
 	}
 
+	// Get fields from logger (thread-safe, but we don't copy to avoid allocations)
+	// Fields are read-only after logger creation, so it's safe to read without copying
+	l.mu.RLock()
+	fields := l.fields
+	l.mu.RUnlock()
+
 	entry := LogEntry{
 		Timestamp:   time.Now().UTC().Format(l.timestampFormat),
 		Level:       level.String(),
@@ -510,6 +535,10 @@ func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 		HostIP:      l.hostIP,
 		ContainerID: l.containerID,
 		Type:        "logback",
+	}
+	// Only set Fields if there are any (to avoid empty map allocation)
+	if len(fields) > 0 {
+		entry.Fields = fields
 	}
 
 	// Output to console
@@ -523,12 +552,33 @@ func (l *Logger) log(level LogLevel, message string, args ...interface{}) {
 
 // logToConsole outputs log to console
 func (l *Logger) logToConsole(entry LogEntry) {
-	fmt.Printf("[%s] %s [%s] [%s] %s\n",
-		entry.Timestamp,
-		entry.Level,
-		entry.LoggerName,
-		entry.ThreadName,
-		entry.Message)
+	// Use buffer pool to reduce allocations
+	buf := l.bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer l.bufPool.Put(buf)
+
+	// Build message using buffer (more efficient than fmt.Sprintf)
+	buf.WriteString("[")
+	buf.WriteString(entry.Timestamp)
+	buf.WriteString("] ")
+	buf.WriteString(entry.Level)
+	buf.WriteString(" [")
+	buf.WriteString(entry.LoggerName)
+	buf.WriteString("] [")
+	buf.WriteString(entry.ThreadName)
+	buf.WriteString("] ")
+	buf.WriteString(entry.Message)
+	buf.WriteByte('\n')
+
+	l.mu.RLock()
+	output := l.output
+	l.mu.RUnlock()
+
+	if output != nil {
+		output.Write(buf.Bytes())
+	} else {
+		os.Stderr.Write(buf.Bytes())
+	}
 }
 
 // logToLogstash sends log to logstash
@@ -663,6 +713,58 @@ func (l *Logger) Error(message string, args ...interface{}) {
 func (l *Logger) Fatal(message string, args ...interface{}) {
 	l.log(FATAL, message, args...)
 	os.Exit(1)
+}
+
+// With returns a new logger instance with the specified fields added to the context.
+// The fields will be included in all subsequent log entries from this logger.
+// This method is thread-safe and creates a new logger instance, so the original logger remains unchanged.
+func (l *Logger) With(fields map[string]interface{}) *Logger {
+	// Create a new logger with copied configuration
+	l.mu.RLock()
+	newLogger := &Logger{
+		logstashEnabled:   l.logstashEnabled,
+		logstashHost:      l.logstashHost,
+		logstashPort:      l.logstashPort,
+		protocol:          l.protocol,
+		appName:           l.appName,
+		hostIP:            l.hostIP,
+		containerID:       l.containerID,
+		minLevel:          l.minLevel,
+		reconnectAttempts: l.reconnectAttempts,
+		reconnectDelay:    l.reconnectDelay,
+		ctx:               l.ctx,
+		cancel:            l.cancel, // Share the same cancel function
+		timestampFormat:   l.timestampFormat,
+		bufferSize:        l.bufferSize,
+		flushInterval:     l.flushInterval,
+		asyncEnabled:      l.asyncEnabled,
+		output:            l.output,
+		prefix:            l.prefix,
+		flags:             l.flags,
+		bufPool: sync.Pool{
+			New: func() interface{} {
+				return &bytes.Buffer{}
+			},
+		},
+		fields: make(map[string]interface{}),
+	}
+	// Copy existing fields
+	for k, v := range l.fields {
+		newLogger.fields[k] = v
+	}
+	l.mu.RUnlock()
+
+	// Add new fields
+	for k, v := range fields {
+		newLogger.fields[k] = v
+	}
+
+	// Share async buffer if enabled
+	if l.asyncEnabled && l.logstashEnabled {
+		newLogger.logBuffer = l.logBuffer
+	}
+
+	return newLogger
 }
 
 // Standard log interface methods for compatibility with log package
