@@ -242,6 +242,11 @@ type LogLevel int
 ```
 Represents the logging level with constants: DEBUG, INFO, WARN, ERROR, FATAL.
 
+**Functions:**
+- `ParseLogLevel(level string) (LogLevel, bool)` - Parses a string and returns the corresponding LogLevel
+- `MustParseLogLevel(level string) LogLevel` - Parses a string and returns the corresponding LogLevel, panics if invalid
+- `(l LogLevel) String() string` - Returns the string representation of the log level
+
 #### Protocol
 ```go
 type Protocol string
@@ -300,7 +305,7 @@ Logs a message at WARN level.
 Logs a message at ERROR level.
 
 #### (l *Logger) Fatal(message string, args ...interface{})
-Logs a message at FATAL level and exits the program.
+Logs a message at FATAL level, flushes all buffered logs, and exits the program.
 
 #### (l *Logger) SetLogstashEnabled(enabled bool)
 Enables or disables logging to Logstash.
@@ -322,6 +327,23 @@ Forces immediate flush of all buffered logs (async mode only).
 
 #### (l *Logger) With(fields map[string]interface{}) *Logger
 Returns a new logger instance with the specified fields added to the context. The fields will be included in all subsequent log entries from this logger. This method is thread-safe and creates a new logger instance, so the original logger remains unchanged.
+
+#### Standard log.Logger Interface Methods
+The logger implements the standard `log.Logger` interface for compatibility:
+- `(l *Logger) Print(v ...interface{})` - Logs at INFO level
+- `(l *Logger) Printf(format string, v ...interface{})` - Logs at INFO level with formatting
+- `(l *Logger) Println(v ...interface{})` - Logs at INFO level
+- `(l *Logger) Fatalf(format string, v ...interface{})` - Logs at FATAL level and exits
+- `(l *Logger) Fatalln(v ...interface{})` - Logs at FATAL level and exits
+- `(l *Logger) Panic(v ...interface{})` - Logs at ERROR level and panics
+- `(l *Logger) Panicf(format string, v ...interface{})` - Logs at ERROR level with formatting and panics
+- `(l *Logger) Panicln(v ...interface{})` - Logs at ERROR level and panics
+- `(l *Logger) SetOutput(w io.Writer)` - Sets the output writer
+- `(l *Logger) Output() io.Writer` - Returns the current output writer
+- `(l *Logger) SetFlags(flag int)` - Sets logging flags (for compatibility)
+- `(l *Logger) Flags() int` - Returns current flags
+- `(l *Logger) SetPrefix(prefix string)` - Sets a prefix for log messages
+- `(l *Logger) Prefix() string` - Returns the current prefix
 
 ## Performance & Asynchronous Logging
 
