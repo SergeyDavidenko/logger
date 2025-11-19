@@ -54,18 +54,30 @@ jobs:
           - TCP/UDP protocol support for Logstash
           - Thread-safe operations with proper mutex synchronization
           - Custom timestamp formatting and function name capture
+          - **Structured logging with `With()` method** - Add context fields to loggers
           
           ### 🔒 Security & Reliability
           - Race condition free - All concurrent access properly synchronized
           - Goroutine safe - No memory leaks or resource issues
           - Panic resistant - Proper error handling throughout
-          - Production tested - 47.2% test coverage
+          - Production tested - **81.6% test coverage**
+          - Zero-copy field access for optimal performance
           
-          ### 📊 Performance (Apple M3 Pro)
-          - **1,160 ns/op** - Ultra-fast logging
-          - **432 B/op** - Memory efficient
-          - **13 allocs/op** - Optimized allocations
-          - **~862,000 ops/sec** - High throughput
+          ### 📊 Performance Benchmarks
+          
+          **Log a message and 10 fields:**
+          - **670.2 ns/op** - Ranks 4th out of 10 tested loggers
+          - **4 allocs/op** - 20% fewer allocations than original
+          - **416 B/op** - Memory efficient
+          - Faster than slog, zap (sugared), go-kit, log15, and logrus
+          
+          **Log a message with pre-configured context:**
+          - **432.9 ns/op** - Ranks 7th out of 10 tested loggers
+          - **3 allocs/op** - 40% fewer allocations than original
+          - **272 B/op** - Ultra memory efficient
+          - Comparable to apex/log (only 7% slower)
+          
+          *Benchmarks run on Go 1.25.0, macOS, Apple M3 Pro (12 cores), 18 GB RAM*
           
           ### 🛠️ Integration
           - ELK Stack ready - Elasticsearch, Logstash, Kibana
