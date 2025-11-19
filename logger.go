@@ -120,16 +120,16 @@ type Logger struct {
 	prefix string
 	flags  int
 
-	// Buffer pools for optimization
-	bufPool     sync.Pool // *bytes.Buffer for console output
-	entryPool   sync.Pool // *LogEntry for reuse
-	jsonBufPool sync.Pool // *bytes.Buffer for JSON encoding
+	// Buffer pools for optimization (pointers to allow sharing between loggers)
+	bufPool     *sync.Pool // *bytes.Buffer for console output
+	entryPool   *sync.Pool // *LogEntry for reuse
+	jsonBufPool *sync.Pool // *bytes.Buffer for JSON encoding
 
 	// Context fields for structured logging (immutable after creation)
 	fields map[string]interface{}
 
-	// Caller info cache
-	callerCache sync.Map // map[uintptr]*callerInfo
+	// Caller info cache (pointer to allow sharing between loggers)
+	callerCache *sync.Map // map[uintptr]*callerInfo
 
 	// Closed flag to prevent double close
 	closed uint32 // atomic
@@ -230,23 +230,26 @@ func New(config Config) *Logger {
 	}
 
 	// Initialize buffer pools
-	logger.bufPool = sync.Pool{
+	logger.bufPool = &sync.Pool{
 		New: func() interface{} {
 			return bytes.NewBuffer(make([]byte, 0, 256))
 		},
 	}
 
-	logger.entryPool = sync.Pool{
+	logger.entryPool = &sync.Pool{
 		New: func() interface{} {
 			return &LogEntry{}
 		},
 	}
 
-	logger.jsonBufPool = sync.Pool{
+	logger.jsonBufPool = &sync.Pool{
 		New: func() interface{} {
 			return bytes.NewBuffer(make([]byte, 0, 512))
 		},
 	}
+
+	// Initialize caller cache
+	logger.callerCache = &sync.Map{}
 
 	// Initialize async logging if enabled
 	if logger.asyncEnabled && logger.logstashEnabled {
@@ -787,6 +790,7 @@ func (l *Logger) With(fields map[string]interface{}) *Logger {
 	}
 
 	// Create new logger sharing most resources
+	// Note: We cannot copy sync.Pool and sync.Map directly, so we share references
 	newLogger := &Logger{
 		logstashEnabled:   l.logstashEnabled,
 		logstashHost:      l.logstashHost,
@@ -809,13 +813,15 @@ func (l *Logger) With(fields map[string]interface{}) *Logger {
 		flags:             l.flags,
 		fields:            newFields,
 		timestampBuf:      make([]byte, 0, 64),
-		// Share pools
-		bufPool:     l.bufPool,
-		entryPool:   l.entryPool,
-		jsonBufPool: l.jsonBufPool,
-		// Share cache
-		callerCache: l.callerCache,
 	}
+
+	// Share pools by pointer (safe to share between loggers)
+	newLogger.bufPool = l.bufPool
+	newLogger.entryPool = l.entryPool
+	newLogger.jsonBufPool = l.jsonBufPool
+
+	// Share cache by pointer (safe to share between loggers)
+	newLogger.callerCache = l.callerCache
 
 	// Share connection - ВАЖНО: atomic.Pointer позволяет хранить nil
 	if conn := l.getConn(); conn != nil {

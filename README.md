@@ -654,24 +654,24 @@ Benchmark results for logging a message with 10 fields.
 
 | Package | Time | Time % to zap | Objects Allocated |
 |---------|------|---------------|-------------------|
-| ⚡ zerolog | 45.94 ns/op | -76% | 0 allocs/op |
-| ⚡ zap | 195.0 ns/op | +0% | 0 allocs/op |
-| apex/log | 449.4 ns/op | +130% | 6 allocs/op |
-| **logger (this package)** | **681.9 ns/op** | **+250%** | **4 allocs/op** |
-| zap (sugared) | 697.4 ns/op | +258% | 1 allocs/op |
-| slog (LogAttrs) | 770.7 ns/op | +295% | 1 allocs/op |
-| slog | 792.8 ns/op | +307% | 1 allocs/op |
-| go-kit | 1707 ns/op | +775% | 29 allocs/op |
-| log15 | 2716 ns/op | +1293% | 42 allocs/op |
-| logrus | 2828 ns/op | +1350% | 52 allocs/op |
+| ⚡ zerolog | 44.23 ns/op | -77% | 0 allocs/op |
+| ⚡ zap | 190.0 ns/op | +0% | 0 allocs/op |
+| apex/log | 409.3 ns/op | +115% | 6 allocs/op |
+| **logger (this package)** | **670.2 ns/op** | **+253%** | **4 allocs/op** |
+| zap (sugared) | 704.9 ns/op | +271% | 1 allocs/op |
+| slog (LogAttrs) | 742.4 ns/op | +291% | 1 allocs/op |
+| slog | 773.3 ns/op | +307% | 1 allocs/op |
+| go-kit | 1486 ns/op | +682% | 29 allocs/op |
+| log15 | 2593 ns/op | +1265% | 42 allocs/op |
+| logrus | 2700 ns/op | +1321% | 52 allocs/op |
 
 **Analysis:**
 - This logger ranks **4th** out of 10 tested loggers
-- Execution time: 681.9 ns/op
-- Memory allocations: 4 allocs/op (improved from 5 allocs/op)
+- Execution time: 670.2 ns/op
+- Memory allocations: 4 allocs/op
 - Faster than slog, zap (sugared), go-kit, log15, and logrus
 - Comparable performance to slog and zap (sugared)
-- **20% fewer allocations** compared to previous version
+- **20% fewer allocations** compared to original version
 
 ### Log a message with a logger that already has 10 fields of context
 
@@ -679,24 +679,24 @@ Benchmark results for logging a message when the logger already has 10 fields of
 
 | Package | Time | Time % to zap | Objects Allocated |
 |---------|------|---------------|-------------------|
-| ⚡ zerolog | 46.04 ns/op | -77% | 0 allocs/op |
-| ⚡ zap | 198.2 ns/op | +0% | 0 allocs/op |
-| ⚡ zap (sugared) | 292.0 ns/op | +47% | 0 allocs/op |
-| slog | 325.6 ns/op | +64% | 0 allocs/op |
-| slog (LogAttrs) | 307.8 ns/op | +55% | 0 allocs/op |
-| apex/log | 409.1 ns/op | +106% | 6 allocs/op |
-| **logger (this package)** | **446.9 ns/op** | **+126%** | **3 allocs/op** |
-| go-kit | 1580 ns/op | +697% | 29 allocs/op |
-| logrus | 2376 ns/op | +1099% | 43 allocs/op |
-| log15 | 3199 ns/op | +1514% | 41 allocs/op |
+| ⚡ zerolog | 45.05 ns/op | -77% | 0 allocs/op |
+| ⚡ zap | 192.1 ns/op | +0% | 0 allocs/op |
+| ⚡ zap (sugared) | 196.8 ns/op | +2% | 0 allocs/op |
+| slog | 295.7 ns/op | +54% | 0 allocs/op |
+| slog (LogAttrs) | 297.5 ns/op | +55% | 0 allocs/op |
+| apex/log | 404.1 ns/op | +110% | 6 allocs/op |
+| **logger (this package)** | **432.9 ns/op** | **+125%** | **3 allocs/op** |
+| go-kit | 1374 ns/op | +616% | 29 allocs/op |
+| logrus | 2214 ns/op | +1053% | 43 allocs/op |
+| log15 | 2741 ns/op | +1327% | 41 allocs/op |
 
 **Analysis:**
 - This logger ranks **7th** out of 10 tested loggers when logging with pre-configured context
-- Execution time: 446.9 ns/op (improved from 465.9 ns/op)
-- Memory allocations: 3 allocs/op (improved from 5 allocs/op)
+- Execution time: 432.9 ns/op
+- Memory allocations: 3 allocs/op
 - Faster than go-kit, log15, and logrus
-- Comparable performance to apex/log (only 9% slower)
-- **4% faster** and **40% fewer allocations** compared to previous version
+- Comparable performance to apex/log (only 7% slower)
+- **40% fewer allocations** compared to original version
 - Full support for structured logging with `With()` method
 
 ### Running Benchmarks
